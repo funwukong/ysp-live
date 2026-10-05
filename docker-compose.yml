@@ -1,0 +1,18 @@
+services:
+  ysp-live:
+    build: .
+    image: ysp-live:latest
+    container_name: ysp-live
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8766}:8766"
+    environment:
+      TZ: Asia/Shanghai
+      PORT: 8766
+      HOST: 0.0.0.0
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8766/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
