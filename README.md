@@ -1,3 +1,6 @@
+[![Build and publish image](https://github.com/funwukong/ysp-live/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/funwukong/ysp-live/actions/workflows/docker-publish.yml)
+[![Release](https://img.shields.io/github/v/release/funwukong/ysp-live)](https://github.com/funwukong/ysp-live/releases)
+
 # ysp-live：央视频全频道直播服务
 
 纯 Python 标准库，无第三方依赖。推荐 Docker 部署，也可以直接 python3 ysp-live.py 跑。
@@ -9,13 +12,13 @@
 镜像由 GitHub Actions 自动构建发布到 GHCR，amd64 / arm64 都有，不用在本地编译：
 
 ```bash
-# 拉取（main 分支最新构建）
-docker pull ghcr.io/funwukong/ysp-live:main
+# 拉取（amd64 / arm64 自动匹配）
+docker pull ghcr.io/funwukong/ysp-live:1.0.0
 
 # 启动
 docker run -d --name ysp-live --restart unless-stopped \
   -e TZ=Asia/Shanghai -p 8766:8766 \
-  ghcr.io/funwukong/ysp-live:main
+  ghcr.io/funwukong/ysp-live:1.0.0
 ```
 
 ### 方式二：从源码构建
