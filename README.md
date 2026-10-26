@@ -69,6 +69,13 @@ docker compose restart
 端口和监听地址由 PORT / HOST 环境变量控制，容器内默认 0.0.0.0:8766。
 改容器内端口时要同步改 docker-compose.yml 里的 healthcheck 和端口映射。
 
+可选环境变量 `LOGO_BASE` 可指定台标图片目录，脚本会为每路频道生成
+`<LOGO_BASE>/<slug>.png` 形式的 `tvg-logo`。`/all.m3u` 同时输出
+`tvg-id`、`tvg-name` 和 `group-title`，并按央视 / CGTN / 卫视 / 剧场自动分组。
+
+如果前面有 HTTPS 反向代理，请传递 `X-Forwarded-Proto: https`，
+`/all.m3u` 会用 https 生成频道链接，避免播放器遇到混合内容。
+
 不用 compose 也行：
 
 ```bash

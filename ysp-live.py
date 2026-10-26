@@ -186,7 +186,6 @@ def jce_timeshift_url(pid, sid, start, end, stream='fhd'):
     if 'liverecord.video.cloud.cctv.com' in url:
         raise DeadHostError('dead cdn host')
     return url
-    return url
 
 
 # ================================================================ cKey + bkliveinfo
@@ -273,6 +272,48 @@ def _ckey(channel_id):
 _BK_H264 = base64.b64encode(b'H(30:1080,60:1080|30:1080,60:1080)').decode()
 
 
+def _host_of(url):
+    return urllib.parse.urlsplit(url).hostname or ''
+
+
+def _is_bk_host(url):
+    return _host_of(url).startswith('bk')
+
+
+def playlist_segments(pl):
+    return [ln.strip() for ln in pl.splitlines()
+            if ln.strip() and not ln.strip().startswith('#')]
+
+
+def seg_probe(url, timeout=6):
+    """分片探活: 只读 1KB 就断开, 确认 CDN 吐的是视频而不是 403 页面。"""
+    req = urllib.request.Request(url, headers={
+        'User-Agent': UA, 'Referer': 'https://live.cctv.cn/', 'Range': 'bytes=0-1023'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if r.getcode() not in (200, 206):
+                return False
+            return len(r.read(1024)) > 0
+    except Exception:
+        return False
+
+
+def playlist_ok(segs):
+    """判断这份清单背后的 CDN 能不能真的吐分片。
+
+    边缘节点上刚发布的最新分片常常瞬时 403 (过 10s 左右才可拉),
+    所以从次新的分片开始探, 只要有一片能下就算这个地址可用;
+    而 bkhlsliveali 这类被封的 CDN 是每一片都 403, 会被正确地排除掉。
+    """
+    picked = []
+    for i in (-2, -1):
+        if len(segs) >= abs(i) and segs[i] not in picked:
+            picked.append(segs[i])
+    if not picked:
+        return False
+    return any(seg_probe(u) for u in picked)
+
+
 def bk_playurls(channel_id, live_pid, defn='fhd'):
     t = _ckey(channel_id)
     q = urllib.parse.urlencode({
@@ -303,8 +344,9 @@ def bk_playurls(channel_id, live_pid, defn='fhd'):
         urls += [x for x in re.split(r'[;,]', bu) if x.strip()]
     urls = [u for u in dict.fromkeys(urls) if u and '.cctv.' in u]
     if not urls: raise RuntimeError('no playurl')
-    # bklive- 备用 CDN 更稳定, 优先用
-    urls.sort(key=lambda u: (0 if 'bklive-' in u else 1, u))
+    # bklive-/bkhlsliveali- 这类"备用 CDN"对分片有防盗链, 裸 GET 一律 403,
+    # 反而 live-* 是通的, 所以优先非 bk 前缀的地址 (最后仍由分片探活确认)。
+    urls.sort(key=lambda u: (1 if _is_bk_host(u) else 0, u))
     return urls
 
 
@@ -331,7 +373,6 @@ def fetch_abs_playlist(url, depth=0):
             out.append(urllib.parse.urljoin(final, s))
         else:
             out.append(ln)
-    return '\n'.join(out)
     return '\n'.join(out)
 
 
@@ -409,6 +450,7 @@ UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML,
 
 HOST = os.environ.get('HOST', '0.0.0.0')
 PORT = int(os.environ.get('PORT', '8766'))
+LOGO_BASE = os.environ.get('LOGO_BASE', '').rstrip('/')
 REFRESH_INTERVAL = 15
 IDLE_TIMEOUT = 120
 WINDOW = 300
@@ -491,19 +533,31 @@ def bk_refresh(ch):
         ch.bk_urls_time = now
         log('%s bkliveinfo 拿到 %d 个地址' % (ch.slug, len(ch.bk_urls)))
     last_err = ''
+    fallback = ''
     for attempt in range(2):
         for u in ch.bk_urls:
             try:
                 pl = fetch_abs_playlist(u)
-                if '#EXTM3U' not in pl: continue
+                if '#EXTM3U' not in pl:
+                    last_err = 'empty playlist'
+                    continue
+                segs = playlist_segments(pl)
+                if not segs:
+                    last_err = 'no segment'
+                    continue
+                if not fallback:
+                    fallback = pl
+                # 清单能拿到不代表能播: 有的 CDN 地址分片一律 403, 先探活
+                if not playlist_ok(segs):
+                    last_err = 'segment blocked on %s' % (_host_of(segs[-1]) or '?')
+                    log('%s 清单可拉但分片被拒, 换下一个地址' % ch.slug)
+                    continue
                 with ch.lock:
                     ch.bk_playlist = pl
                     ch.last_error = ''
                 return True
             except urllib.error.HTTPError as e:
                 last_err = 'HTTPError: HTTP %s' % e.code
-                if e.code == 403:
-                    time.sleep(2)
                 continue
             except Exception as e:
                 last_err = '%s: %s' % (type(e).__name__, e)
@@ -514,6 +568,14 @@ def bk_refresh(ch):
                 log('%s 地址疑似过期, 已重取' % ch.slug)
             except Exception:
                 pass
+    if fallback:
+        # 所有地址探活都失败: 央视频边缘节点对新分片有 ~10s 的瞬时 403,
+        # 与其让频道直接 503, 不如先下发清单, 由播放器自行重试。
+        with ch.lock:
+            ch.bk_playlist = fallback
+            ch.last_error = 'unverified: %s' % (last_err or 'probe failed')[:100]
+        log('%s 探活未通过, 先下发未验证清单 (%s)' % (ch.slug, last_err))
+        return True
     ch.bk_urls_time = 0
     raise RuntimeError(last_err[:120] or 'bk playlist failed')
 
@@ -610,7 +672,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
-        self.wfile.write(data)
+        if not getattr(self, '_head_only', False):
+            self.wfile.write(data)
+
+    def _base_url(self):
+        # 反代到 https 时 X-Forwarded-Proto 才是对外协议, 否则订阅里全是 http 链接
+        host = self.headers.get('Host') or 'localhost:%d' % PORT
+        proto = (self.headers.get('X-Forwarded-Proto') or 'http').split(',')[0].strip().lower()
+        if proto not in ('http', 'https'):
+            proto = 'http'
+        return '%s://%s' % (proto, host)
+
+    def do_HEAD(self):
+        self._head_only = True
+        self.do_GET()
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
@@ -621,11 +696,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, 'ok')
             return
         if path == '/all.m3u':
-            host = self.headers.get('Host', 'localhost:8766')
+            base = self._base_url()
             lines = ['#EXTM3U']
             for slug, name, _s, _p, _d in CHANNELS:
-                lines.append('#EXTINF:-1,%s' % name)
-                lines.append('http://%s/%s.m3u8' % (host, slug))
+                lines.append(extinf(slug, name))
+                lines.append('%s/%s.m3u8' % (base, slug))
             self._send(200, '\n'.join(lines) + '\n', 'application/vnd.apple.mpegurl')
             return
         if path == '/diag':
@@ -648,6 +723,22 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, pl, 'application/vnd.apple.mpegurl')
             return
         self._send(404, 'not found\n')
+
+
+def channel_group(name):
+    if '剧场' in name: return '剧场'
+    if name.startswith('CCTV'): return '央视'
+    if name.startswith('CGTN'): return 'CGTN'
+    if name.endswith('卫视'): return '卫视'
+    return '其他'
+
+
+def extinf(slug, name):
+    attrs = 'tvg-id="%s" tvg-name="%s"' % (slug, name)
+    if LOGO_BASE:
+        attrs += ' tvg-logo="%s/%s.png"' % (LOGO_BASE, slug)
+    attrs += ' group-title="%s"' % channel_group(name)
+    return '#EXTINF:-1 %s,%s' % (attrs, name)
 
 
 def index_page():
