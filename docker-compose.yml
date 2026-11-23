@@ -6,10 +6,12 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-8766}:8766"
+    volumes:
+      - ./data:/data
     environment:
       TZ: Asia/Shanghai
       PORT: 8766
-      HOST: 0.0.0.0
+      YSP_DATA_DIR: /data
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8766/health"]
       interval: 30s
