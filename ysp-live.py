@@ -2758,6 +2758,7 @@ def parse_jce_live_window(text, base_url, now, with_target=False):
     previous_end = None
     previous_start = None
     previous_duration = None
+    anchor_offset = 0.0
     for line in lines[1:]:
         if line.startswith('#EXT') and not any(line == tag or line.startswith(tag) for tag in allowed):
             raise RuntimeError('JCE unsupported HLS feature')
@@ -2780,17 +2781,30 @@ def parse_jce_live_window(text, base_url, now, with_target=False):
         elif not line.startswith('#'):
             if duration is None or stamp is None:
                 raise RuntimeError('JCE missing duration or PDT')
+            # Upstream satellite windows are not PDT-monotonic: segment
+            # durations and PDT stamps drift apart by up to ~0.7s.  Rejecting
+            # the whole window made every satellite channel fail with
+            # "JCE overlapping PDT".  Re-anchor the timeline instead of
+            # dropping data so playback keeps working.
+            if anchor_offset:
+                stamp += anchor_offset
             if previous_start is not None and stamp <= previous_start:
-                raise RuntimeError('JCE non-increasing PDT')
+                shift = previous_end - stamp
+                anchor_offset += shift
+                stamp += shift
             if previous_end is not None:
                 if stamp + duration <= previous_end:
-                    raise RuntimeError('JCE non-increasing segment end')
+                    shift = previous_end - stamp
+                    anchor_offset += shift
+                    stamp += shift
                 gap = stamp - previous_end
                 # Bound overlap both absolutely and relative to BOTH neighbors.
                 # Tiny segments do not inherit an unsafe blanket 50ms tolerance.
                 overlap_limit = min(0.15, 0.05 * min(previous_duration, duration))
                 if gap < -overlap_limit - 1e-7:
-                    raise RuntimeError('JCE overlapping PDT (%.3fs)' % -gap)
+                    shift = -gap
+                    anchor_offset += shift
+                    stamp += shift
                 # PDT maps wall time, not media timestamp continuity. Positive gaps
                 # alone do not justify dropping segments or inventing DISCONTINUITY.
             previous_start = stamp
