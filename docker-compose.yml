@@ -1,20 +1,28 @@
 services:
   ysp-live:
     build: .
-    image: ysp-live:latest
+    image: ysp-live:11.3
     container_name: ysp-live
     restart: unless-stopped
     ports:
-      - "${PORT:-8766}:8766"
+      - "${PORT:-8767}:8767"
     volumes:
       - ./data:/data
     environment:
       TZ: Asia/Shanghai
-      PORT: 8766
+      PORT: 8767
       YSP_DATA_DIR: /data
+      # 单设备高码率并发配额（0 = 不设限）
+      YSP_LINKS_PER_DEVICE: 6
+      # 换台后升码率的等待秒数（0 = 首个请求即尝试高码率）
+      YSP_ZAP_DEBOUNCE: 0
+      # 追加命令行参数，例如 "--no-4k" 或 "--only-4k"
+      YSP_EXTRA_ARGS: ""
+      # 伴生 WASM 引擎端口（0 = 由引擎自动选择）
+      YSP_ENGINE_PORT: 8787
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8766/health"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8767/health"]
       interval: 30s
       timeout: 5s
-      start_period: 5s
+      start_period: 15s
       retries: 3
